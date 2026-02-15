@@ -29,9 +29,13 @@ jobs:
 
             Install:
             1. Download `QuickRes-<version>-macOS-unsigned.zip`
-            2. Move `QuickRes.app` to `/Applications`
-            3. If blocked by Gatekeeper, right-click app > Open, or run:
-               xattr -dr com.apple.quarantine /Applications/QuickRes.app
+            2. Unzip it in your preferred location (you should see `QuickRes.app`)
+            3. Open `QuickRes.app`
+
+            If macOS blocks it:
+            - Right-click `QuickRes.app` > Open > Open
+            - Or run:
+              xattr -dr com.apple.quarantine /path/to/downloaded/app/QuickRes.app
           files: |
             dist/*.zip
             dist/*.sha256
