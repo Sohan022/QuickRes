@@ -6,7 +6,7 @@ QuickRes is a lightweight macOS menu bar app to switch display resolutions.
 
 - Download the latest build: [Latest QuickRes release](https://github.com/Sohan022/QuickRes/releases/latest)
 - Download `QuickRes-<version>-macOS-unsigned.zip` from Assets.
-- Unzip and move `QuickRes.app` to `/Applications`.
+- Unzip it in your preferred location (you should see `QuickRes.app`).
 - Open `QuickRes.app`. It will appear in the macOS menu bar.
 
 ### If macOS blocks it (expected for free non-notarized builds)
@@ -17,7 +17,7 @@ Option 1:
 Option 2:
 - Run:
 ```bash
-xattr -dr com.apple.quarantine /Applications/QuickRes.app
+xattr -dr com.apple.quarantine /path/to/downloaded/app/QuickRes.app
 ```
 
 ## Build From Source
