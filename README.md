@@ -2,6 +2,10 @@
 
 QuickRes is a lightweight macOS menu bar app to switch display resolutions.
 
+## Preview
+
+![QuickRes menu bar preview](assets/quickres-menu-preview.png)
+
 ## Install (Free / Developer-Friendly)
 
 - Download the latest build: [Latest QuickRes release](https://github.com/Sohan022/QuickRes/releases/latest)
