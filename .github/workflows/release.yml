@@ -1,0 +1,38 @@
+name: Release macOS app (free non-notarized build)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and package app
+        run: |
+          chmod +x scripts/package_app.sh
+          VERSION="${GITHUB_REF_NAME}" scripts/package_app.sh
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            This release is built with the free approach (ad-hoc signed, not Apple notarized).
+
+            Install:
+            1. Download `QuickRes-<version>-macOS-unsigned.zip`
+            2. Move `QuickRes.app` to `/Applications`
+            3. If blocked by Gatekeeper, right-click app > Open, or run:
+               xattr -dr com.apple.quarantine /Applications/QuickRes.app
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
