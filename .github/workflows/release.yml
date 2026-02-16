@@ -36,6 +36,7 @@ jobs:
             - Right-click `QuickRes.app` > Open > Open
             - Or run:
               xattr -dr com.apple.quarantine /path/to/downloaded/app/QuickRes.app
+              (macOS adds a quarantine tag to downloaded apps; this removes it for this QuickRes copy so it can open. Use only if you trust the source.)
           files: |
             dist/*.zip
             dist/*.sha256

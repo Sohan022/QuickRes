@@ -6,7 +6,7 @@ QuickRes is a lightweight macOS menu bar app to switch display resolutions.
 
 ![QuickRes menu bar preview](assets/quickres-menu-preview.png)
 
-## Install (Free / Developer-Friendly)
+## Install
 
 - Download the latest build: [Latest QuickRes release](https://github.com/Sohan022/QuickRes/releases/latest)
 - Download `QuickRes-<version>-macOS-unsigned.zip` from Assets.
@@ -23,6 +23,9 @@ Option 2:
 ```bash
 xattr -dr com.apple.quarantine /path/to/downloaded/app/QuickRes.app
 ```
+macOS adds a quarantine tag to apps downloaded from the internet, which can block first launch.
+This command removes that tag only for this QuickRes app copy so it can open.
+Run this only if you trust the app source.
 
 ## Build From Source
 
