@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
@@ -16,6 +17,27 @@ private struct ModeDescriptor: Hashable {
     }
 }
 
+private struct StoredMode: Codable, Hashable {
+    let width: Int
+    let height: Int
+    let refreshMilliHz: Int
+    let isHiDPI: Bool
+
+    init(mode: CGDisplayMode) {
+        width = mode.width
+        height = mode.height
+        refreshMilliHz = Int((mode.refreshRate * 1000.0).rounded())
+        isHiDPI = mode.pixelWidth > mode.width || mode.pixelHeight > mode.height
+    }
+
+    func matches(_ mode: CGDisplayMode) -> Bool {
+        width == mode.width &&
+            height == mode.height &&
+            refreshMilliHz == Int((mode.refreshRate * 1000.0).rounded()) &&
+            isHiDPI == (mode.pixelWidth > mode.width || mode.pixelHeight > mode.height)
+    }
+}
+
 private struct CuratedModeKey: Hashable {
     let width: Int
     let height: Int
@@ -29,6 +51,15 @@ private final class ModeSelection: NSObject {
     init(displayID: CGDirectDisplayID, mode: CGDisplayMode) {
         self.displayID = displayID
         self.mode = mode
+        super.init()
+    }
+}
+
+private final class DisplaySelection: NSObject {
+    let displayID: CGDirectDisplayID
+
+    init(displayID: CGDirectDisplayID) {
+        self.displayID = displayID
         super.init()
     }
 }
@@ -155,13 +186,59 @@ private final class DisplayManager {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let hotKeySignature: OSType = 0x51525253 // "QRRS"
+    private static let hotKeyHandler: EventHandlerUPP = { _, event, _ in
+        guard let event else {
+            return noErr
+        }
+
+        var hotKeyID = EventHotKeyID()
+        let status = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        guard status == noErr, hotKeyID.signature == hotKeySignature else {
+            return noErr
+        }
+
+        sharedForHotKeys?.handlePreviousModeHotKey(slot: Int(hotKeyID.id))
+        return noErr
+    }
+    private static weak var sharedForHotKeys: AppDelegate?
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let displayManager = DisplayManager()
     private let defaults = UserDefaults.standard
     private let showAllModesKey = "showAllModesAdvanced"
     private let riskAckPrefix = "riskAcknowledged"
+    private let favoritesKey = "favoriteModesByDisplay"
+    private let previousModeKey = "previousModesByDisplay"
+    private let maxFavoritesPerDisplay = 4
+    private let hotKeyHint = "Hotkey: Ctrl+Option+Cmd+[1-9] toggles Previous Mode"
+    private let hotKeyKeyCodes: [Int: UInt32] = [
+        1: UInt32(kVK_ANSI_1),
+        2: UInt32(kVK_ANSI_2),
+        3: UInt32(kVK_ANSI_3),
+        4: UInt32(kVK_ANSI_4),
+        5: UInt32(kVK_ANSI_5),
+        6: UInt32(kVK_ANSI_6),
+        7: UInt32(kVK_ANSI_7),
+        8: UInt32(kVK_ANSI_8),
+        9: UInt32(kVK_ANSI_9),
+    ]
     private var lastErrorMessage: String?
     private var displaysByID = [CGDirectDisplayID: DisplayInfo]()
+    private var displaySlotsByNumber = [Int: CGDirectDisplayID]()
+    private var displaySlotsByDisplayID = [CGDirectDisplayID: Int]()
+    private var favoritesByDisplay = [String: [StoredMode]]()
+    private var previousModeByDisplay = [String: StoredMode]()
+    private var hotKeyRefs = [Int: EventHotKeyRef]()
+    private var hotKeyHandlerRef: EventHandlerRef?
 
     private var showAllModes: Bool {
         get { defaults.bool(forKey: showAllModesKey) }
@@ -170,12 +247,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        loadPersistedSettings()
+        Self.sharedForHotKeys = self
+        registerHotKeys()
         configureStatusItem()
         installObservers()
         rebuildMenu()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        unregisterHotKeys()
+        Self.sharedForHotKeys = nil
         removeObservers()
     }
 
@@ -191,6 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let displays = displayManager.allDisplays()
         displaysByID = Dictionary(uniqueKeysWithValues: displays.map { ($0.id, $0) })
+        displaySlotsByNumber = Dictionary(uniqueKeysWithValues: displays.enumerated().map { ($0.offset + 1, $0.element.id) })
+        displaySlotsByDisplayID = Dictionary(uniqueKeysWithValues: displays.enumerated().map { ($0.element.id, $0.offset + 1) })
         if displays.isEmpty {
             let empty = NSMenuItem(title: "No displays found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
@@ -202,6 +286,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+        let hotKeyItem = NSMenuItem(title: hotKeyHint, action: nil, keyEquivalent: "")
+        hotKeyItem.isEnabled = false
+        menu.addItem(hotKeyItem)
         let advanced = NSMenuItem(
             title: "Show All Modes (Advanced)",
             action: #selector(toggleShowAllModes(_:)),
@@ -233,13 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             acknowledgeRisk(displayID: selection.displayID, mode: selection.mode)
         }
 
-        do {
-            try displayManager.setDisplayMode(displayID: selection.displayID, mode: selection.mode)
-            lastErrorMessage = nil
-        } catch {
-            lastErrorMessage = error.localizedDescription
-        }
-        rebuildMenu()
+        applyModeChange(on: display, to: selection.mode)
     }
 
     @objc private func quit() {
@@ -248,6 +329,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleShowAllModes(_ sender: NSMenuItem) {
         showAllModes.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func togglePreviousModeFromMenu(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? DisplaySelection,
+              let display = displaysByID[selection.displayID] else {
+            return
+        }
+        togglePreviousMode(on: display)
+    }
+
+    @objc private func toggleCurrentModeFavorite(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? DisplaySelection,
+              let display = displaysByID[selection.displayID] else {
+            return
+        }
+
+        var favorites = storedFavorites(for: display.id)
+        let current = StoredMode(mode: display.currentMode)
+        if favorites.contains(current) {
+            favorites.removeAll { $0 == current }
+        } else {
+            guard favorites.count < maxFavoritesPerDisplay else {
+                lastErrorMessage = "Favorites are limited to \(maxFavoritesPerDisplay) modes per display."
+                rebuildMenu()
+                return
+            }
+            favorites.append(current)
+        }
+
+        setStoredFavorites(favorites, for: display.id)
+        rebuildMenu()
+    }
+
+    @objc private func unpinFavorite(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? ModeSelection else {
+            return
+        }
+        var favorites = storedFavorites(for: selection.displayID)
+        let stored = StoredMode(mode: selection.mode)
+        favorites.removeAll { $0 == stored }
+        setStoredFavorites(favorites, for: selection.displayID)
         rebuildMenu()
     }
 
@@ -261,8 +384,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeDisplayItem(_ display: DisplayInfo) -> NSMenuItem {
-        let root = NSMenuItem(title: display.name, action: nil, keyEquivalent: "")
+        let slotSuffix = displaySlotsByDisplayID[display.id].map { " [\($0)]" } ?? ""
+        let root = NSMenuItem(title: display.name + slotSuffix, action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: display.name)
+
+        let previousItem = NSMenuItem(
+            title: titleForPreviousToggle(on: display),
+            action: #selector(togglePreviousModeFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        previousItem.target = self
+        previousItem.representedObject = DisplaySelection(displayID: display.id)
+        previousItem.isEnabled = canTogglePreviousMode(on: display)
+        submenu.addItem(previousItem)
+
+        let favorites = favoriteModes(on: display)
+        if !favorites.isEmpty {
+            addSection("Favorites", modes: favorites, for: display, in: submenu)
+        }
 
         if showAllModes {
             addSection("All Modes", modes: display.modes, for: display, in: submenu)
@@ -272,9 +411,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !groups.more.isEmpty {
                 addSection("More Modes", modes: groups.more, for: display, in: submenu)
             }
-            if !groups.legacy.isEmpty {
-                addSection("Legacy / Low Resolution", modes: groups.legacy, for: display, in: submenu)
+        }
+
+        submenu.addItem(.separator())
+
+        let currentStored = StoredMode(mode: display.currentMode)
+        let favoriteToggle = NSMenuItem(
+            title: currentModeFavoriteTitle(for: display, currentMode: currentStored),
+            action: #selector(toggleCurrentModeFavorite(_:)),
+            keyEquivalent: ""
+        )
+        favoriteToggle.target = self
+        favoriteToggle.representedObject = DisplaySelection(displayID: display.id)
+        if !storedFavorites(for: display.id).contains(currentStored),
+           storedFavorites(for: display.id).count >= maxFavoritesPerDisplay {
+            favoriteToggle.isEnabled = false
+        }
+        submenu.addItem(favoriteToggle)
+
+        if !favorites.isEmpty {
+            let unpinHeader = NSMenuItem(title: "Unpin Favorite", action: nil, keyEquivalent: "")
+            let unpinMenu = NSMenu(title: "Unpin Favorite")
+            for mode in favorites {
+                let item = NSMenuItem(
+                    title: title(for: mode, on: display),
+                    action: #selector(unpinFavorite(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = ModeSelection(displayID: display.id, mode: mode)
+                unpinMenu.addItem(item)
             }
+            unpinHeader.submenu = unpinMenu
+            submenu.addItem(unpinHeader)
         }
 
         root.submenu = submenu
@@ -402,6 +571,216 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !modes.contains(where: { $0.ioDisplayModeID == mode.ioDisplayModeID }) {
             modes.append(mode)
         }
+    }
+
+    private func storageKey(for displayID: CGDirectDisplayID) -> String {
+        String(displayID)
+    }
+
+    private func storedFavorites(for displayID: CGDirectDisplayID) -> [StoredMode] {
+        favoritesByDisplay[storageKey(for: displayID)] ?? []
+    }
+
+    private func setStoredFavorites(_ favorites: [StoredMode], for displayID: CGDirectDisplayID) {
+        var normalized = [StoredMode]()
+        for favorite in favorites where !normalized.contains(favorite) {
+            normalized.append(favorite)
+        }
+        if normalized.count > maxFavoritesPerDisplay {
+            normalized = Array(normalized.prefix(maxFavoritesPerDisplay))
+        }
+        favoritesByDisplay[storageKey(for: displayID)] = normalized
+        persistFavorites()
+    }
+
+    private func setPreviousMode(_ mode: StoredMode, for displayID: CGDirectDisplayID) {
+        previousModeByDisplay[storageKey(for: displayID)] = mode
+        persistPreviousModes()
+    }
+
+    private func previousMode(for displayID: CGDirectDisplayID) -> StoredMode? {
+        previousModeByDisplay[storageKey(for: displayID)]
+    }
+
+    private func resolvedMode(for storedMode: StoredMode, on display: DisplayInfo) -> CGDisplayMode? {
+        if let exact = display.modes.first(where: { storedMode.matches($0) }) {
+            return exact
+        }
+
+        return display.modes
+            .filter {
+                $0.width == storedMode.width &&
+                    $0.height == storedMode.height &&
+                    isHiDPI($0) == storedMode.isHiDPI
+            }
+            .max(by: { modeSort($1, $0) })
+    }
+
+    private func favoriteModes(on display: DisplayInfo) -> [CGDisplayMode] {
+        let stored = storedFavorites(for: display.id)
+        var resolved = [CGDisplayMode]()
+        var normalizedStored = [StoredMode]()
+
+        for favorite in stored {
+            guard let mode = resolvedMode(for: favorite, on: display) else {
+                continue
+            }
+            if resolved.contains(where: { $0.ioDisplayModeID == mode.ioDisplayModeID }) {
+                continue
+            }
+            resolved.append(mode)
+            normalizedStored.append(StoredMode(mode: mode))
+        }
+
+        if normalizedStored != stored {
+            setStoredFavorites(normalizedStored, for: display.id)
+        }
+        return resolved
+    }
+
+    private func applyModeChange(on display: DisplayInfo, to mode: CGDisplayMode) {
+        guard mode.ioDisplayModeID != display.currentMode.ioDisplayModeID else {
+            return
+        }
+
+        let current = StoredMode(mode: display.currentMode)
+        do {
+            try displayManager.setDisplayMode(displayID: display.id, mode: mode)
+            setPreviousMode(current, for: display.id)
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
+        rebuildMenu()
+    }
+
+    private func canTogglePreviousMode(on display: DisplayInfo) -> Bool {
+        guard let previous = previousMode(for: display.id),
+              let mode = resolvedMode(for: previous, on: display) else {
+            return false
+        }
+        return mode.ioDisplayModeID != display.currentMode.ioDisplayModeID
+    }
+
+    private func titleForPreviousToggle(on display: DisplayInfo) -> String {
+        guard let previous = previousMode(for: display.id),
+              let mode = resolvedMode(for: previous, on: display) else {
+            return "Previous Mode (Unavailable)"
+        }
+        return "Previous Mode: \(title(for: mode, on: display))"
+    }
+
+    private func togglePreviousMode(on display: DisplayInfo) {
+        guard let previous = previousMode(for: display.id),
+              let mode = resolvedMode(for: previous, on: display) else {
+            lastErrorMessage = "No previous mode found for \(display.name)."
+            rebuildMenu()
+            return
+        }
+        applyModeChange(on: display, to: mode)
+    }
+
+    private func currentModeFavoriteTitle(for display: DisplayInfo, currentMode: StoredMode) -> String {
+        let favorites = storedFavorites(for: display.id)
+        if favorites.contains(currentMode) {
+            return "Unpin Current Mode from Favorites"
+        }
+        if favorites.count >= maxFavoritesPerDisplay {
+            return "Pin Current Mode to Favorites (Max \(maxFavoritesPerDisplay))"
+        }
+        return "Pin Current Mode to Favorites"
+    }
+
+    private func loadPersistedSettings() {
+        if let data = defaults.data(forKey: favoritesKey),
+           let decoded = try? JSONDecoder().decode([String: [StoredMode]].self, from: data) {
+            favoritesByDisplay = decoded
+            for (key, favorites) in decoded {
+                favoritesByDisplay[key] = Array(favorites.prefix(maxFavoritesPerDisplay))
+            }
+        }
+
+        if let data = defaults.data(forKey: previousModeKey),
+           let decoded = try? JSONDecoder().decode([String: StoredMode].self, from: data) {
+            previousModeByDisplay = decoded
+        }
+    }
+
+    private func persistFavorites() {
+        guard let data = try? JSONEncoder().encode(favoritesByDisplay) else {
+            return
+        }
+        defaults.set(data, forKey: favoritesKey)
+    }
+
+    private func persistPreviousModes() {
+        guard let data = try? JSONEncoder().encode(previousModeByDisplay) else {
+            return
+        }
+        defaults.set(data, forKey: previousModeKey)
+    }
+
+    private func registerHotKeys() {
+        if hotKeyHandlerRef == nil {
+            var eventSpec = EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: OSType(kEventHotKeyPressed)
+            )
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                Self.hotKeyHandler,
+                1,
+                &eventSpec,
+                nil,
+                &hotKeyHandlerRef
+            )
+        }
+
+        unregisterRegisteredHotKeys()
+
+        for slot in 1...9 {
+            guard let keyCode = hotKeyKeyCodes[slot] else {
+                continue
+            }
+
+            let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: UInt32(slot))
+            var hotKeyRef: EventHotKeyRef?
+            let status = RegisterEventHotKey(
+                keyCode,
+                UInt32(cmdKey | optionKey | controlKey),
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &hotKeyRef
+            )
+            if status == noErr, let hotKeyRef {
+                hotKeyRefs[slot] = hotKeyRef
+            }
+        }
+    }
+
+    private func unregisterRegisteredHotKeys() {
+        for ref in hotKeyRefs.values {
+            UnregisterEventHotKey(ref)
+        }
+        hotKeyRefs.removeAll()
+    }
+
+    private func unregisterHotKeys() {
+        unregisterRegisteredHotKeys()
+        if let hotKeyHandlerRef {
+            RemoveEventHandler(hotKeyHandlerRef)
+            self.hotKeyHandlerRef = nil
+        }
+    }
+
+    private func handlePreviousModeHotKey(slot: Int) {
+        guard let displayID = displaySlotsByNumber[slot],
+              let display = displaysByID[displayID] else {
+            NSSound.beep()
+            return
+        }
+        togglePreviousMode(on: display)
     }
 
     private func shouldConfirmRiskyMode(_ mode: CGDisplayMode, on display: DisplayInfo) -> Bool {

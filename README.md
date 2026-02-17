@@ -37,10 +37,17 @@ swift run QuickRes
 
 After launch, click the display icon in the macOS menu bar and choose a display resolution.
 
+Quick tips:
+- Use `Pin Current Mode to Favorites` in each display submenu to add/remove favorites.
+- Display titles include slot numbers like `[1]`, `[2]` used by the hotkey.
+
 ## Features
 
+- Favorites section (pin up to 4 modes per display).
+- One-click Previous Mode toggle per display.
+- Global hotkey: `Ctrl + Option + Cmd + [display number]` to toggle Previous Mode.
 - Shows all currently active displays (built-in + external monitors).
-- Curated default list with `Recommended`, `More Modes`, and `Legacy / Low Resolution` sections.
+- Curated default list with `Recommended` and `More Modes` sections.
 - Advanced toggle to show all available modes.
 - Switches mode with one click from the menu bar.
 - Confirms first-time switches for risky modes (legacy or low-quality options).
