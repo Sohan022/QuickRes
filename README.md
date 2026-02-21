@@ -40,6 +40,7 @@ After launch, click the display icon in the macOS menu bar and choose a display 
 Quick tips:
 - Use `Pin Current Mode to Favorites` in each display submenu to add/remove favorites.
 - Display titles include slot numbers like `[1]`, `[2]` used by the hotkey.
+- Turn on `Launch at Login` from the menu to auto-start QuickRes after reboot (macOS 13+).
 
 ## Features
 
@@ -49,6 +50,7 @@ Quick tips:
 - Shows all currently active displays (built-in + external monitors).
 - Curated default list with `Recommended` and `More Modes` sections.
 - Advanced toggle to show all available modes.
+- `Launch at Login` toggle in the menu (macOS 13+).
 - Switches mode with one click from the menu bar.
 - Confirms first-time switches for risky modes (legacy or low-quality options).
 

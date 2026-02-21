@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import ServiceManagement
 
 private struct ModeDescriptor: Hashable {
     let width: Int
@@ -289,6 +290,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotKeyItem = NSMenuItem(title: hotKeyHint, action: nil, keyEquivalent: "")
         hotKeyItem.isEnabled = false
         menu.addItem(hotKeyItem)
+        let launchAtLoginItem = NSMenuItem(
+            title: launchAtLoginMenuTitle(),
+            action: #selector(toggleLaunchAtLogin(_:)),
+            keyEquivalent: ""
+        )
+        launchAtLoginItem.target = self
+        launchAtLoginItem.state = launchAtLoginMenuState()
+        launchAtLoginItem.isEnabled = launchAtLoginToggleIsSupported()
+        menu.addItem(launchAtLoginItem)
         let advanced = NSMenuItem(
             title: "Show All Modes (Advanced)",
             action: #selector(toggleShowAllModes(_:)),
@@ -329,6 +339,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleShowAllModes(_ sender: NSMenuItem) {
         showAllModes.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        guard #available(macOS 13.0, *) else {
+            lastErrorMessage = "Launch at Login requires macOS 13 or later."
+            rebuildMenu()
+            return
+        }
+
+        do {
+            switch SMAppService.mainApp.status {
+            case .enabled:
+                try SMAppService.mainApp.unregister()
+            default:
+                try SMAppService.mainApp.register()
+            }
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = "Failed to update Launch at Login: \(error.localizedDescription)"
+        }
         rebuildMenu()
     }
 
@@ -781,6 +812,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         togglePreviousMode(on: display)
+    }
+
+    private func launchAtLoginToggleIsSupported() -> Bool {
+        if #available(macOS 13.0, *) {
+            return true
+        }
+        return false
+    }
+
+    private func launchAtLoginMenuTitle() -> String {
+        guard #available(macOS 13.0, *) else {
+            return "Launch at Login (macOS 13+)"
+        }
+
+        switch SMAppService.mainApp.status {
+        case .requiresApproval:
+            return "Launch at Login (Needs approval in System Settings)"
+        default:
+            return "Launch at Login"
+        }
+    }
+
+    private func launchAtLoginMenuState() -> NSControl.StateValue {
+        guard #available(macOS 13.0, *) else {
+            return .off
+        }
+
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            return .on
+        case .requiresApproval:
+            return .mixed
+        default:
+            return .off
+        }
     }
 
     private func shouldConfirmRiskyMode(_ mode: CGDisplayMode, on display: DisplayInfo) -> Bool {
