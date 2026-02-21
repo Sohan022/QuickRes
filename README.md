@@ -40,11 +40,13 @@ After launch, click the display icon in the macOS menu bar and choose a display 
 Quick tips:
 - Use `Pin Current Mode to Favorites` in each display submenu to add/remove favorites.
 - Display titles include slot numbers like `[1]`, `[2]` used by the hotkey.
+- `Launch at Login` works only when running `QuickRes.app` (not `swift run QuickRes`).
 
 ## Features
 
 - Favorites section (pin up to 4 modes per display).
 - One-click Previous Mode toggle per display.
+- Launch-at-login toggle for automatic startup.
 - Global hotkey: `Ctrl + Option + Cmd + [display number]` to toggle Previous Mode.
 - Shows all currently active displays (built-in + external monitors).
 - Curated default list with `Recommended` and `More Modes` sections.

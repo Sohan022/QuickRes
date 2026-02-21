@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import ServiceManagement
 
 private struct ModeDescriptor: Hashable {
     let width: Int
@@ -289,6 +290,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotKeyItem = NSMenuItem(title: hotKeyHint, action: nil, keyEquivalent: "")
         hotKeyItem.isEnabled = false
         menu.addItem(hotKeyItem)
+
+        let launchAtLogin = makeLaunchAtLoginMenuItem()
+        menu.addItem(launchAtLogin)
+        if shouldShowLaunchAtLoginHelpText {
+            let help = NSMenuItem(title: launchAtLoginHelpText, action: nil, keyEquivalent: "")
+            help.isEnabled = false
+            menu.addItem(help)
+        }
+
         let advanced = NSMenuItem(
             title: "Show All Modes (Advanced)",
             action: #selector(toggleShowAllModes(_:)),
@@ -371,6 +381,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let stored = StoredMode(mode: selection.mode)
         favorites.removeAll { $0 == stored }
         setStoredFavorites(favorites, for: selection.displayID)
+        rebuildMenu()
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        guard #available(macOS 13.0, *) else {
+            return
+        }
+        guard isRunningFromAppBundle else {
+            lastErrorMessage = "Launch at Login requires QuickRes.app (not swift run)."
+            rebuildMenu()
+            return
+        }
+
+        do {
+            switch SMAppService.mainApp.status {
+            case .enabled:
+                try SMAppService.mainApp.unregister()
+            case .notRegistered:
+                try SMAppService.mainApp.register()
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+            case .notFound:
+                throw NSError(
+                    domain: "QuickRes",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "QuickRes.app was not found in Applications. Move it to /Applications or ~/Applications and try again."]
+                )
+            @unknown default:
+                try SMAppService.mainApp.register()
+            }
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = launchAtLoginErrorMessage(for: error)
+        }
+
         rebuildMenu()
     }
 
@@ -571,6 +616,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !modes.contains(where: { $0.ioDisplayModeID == mode.ioDisplayModeID }) {
             modes.append(mode)
         }
+    }
+
+    private var isRunningFromAppBundle: Bool {
+        Bundle.main.bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame
+    }
+
+    private var launchAtLoginHelpText: String {
+        if #available(macOS 13.0, *) {
+            if SMAppService.mainApp.status == .requiresApproval {
+                return "macOS requires approval in System Settings > Login Items."
+            }
+            return ""
+        }
+        return "Launch at Login requires macOS 13 or later."
+    }
+
+    private var shouldShowLaunchAtLoginHelpText: Bool {
+        !launchAtLoginHelpText.isEmpty
+    }
+
+    private func makeLaunchAtLoginMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "Launch at Login",
+            action: #selector(toggleLaunchAtLogin(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+
+        guard isRunningFromAppBundle else {
+            item.isEnabled = false
+            item.state = .off
+            return item
+        }
+
+        guard #available(macOS 13.0, *) else {
+            item.isEnabled = false
+            item.state = .off
+            return item
+        }
+
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            item.state = .on
+        case .requiresApproval:
+            item.state = .mixed
+        default:
+            item.state = .off
+        }
+
+        return item
+    }
+
+    private func launchAtLoginErrorMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        switch nsError.code {
+        case Int(kSMErrorAlreadyRegistered):
+            return "Launch at Login is already enabled."
+        case Int(kSMErrorJobNotFound):
+            return "Launch at Login is already disabled."
+        case Int(kSMErrorLaunchDeniedByUser):
+            return "Launch at Login permission was denied in System Settings."
+        case Int(kSMErrorInvalidSignature):
+            return "QuickRes.app signature is invalid. Reinstall the app and try again."
+        case Int(kSMErrorInvalidPlist):
+            return "QuickRes app bundle is invalid. Reinstall the app and try again."
+        default:
+            break
+        }
+
+        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if message.isEmpty {
+            return "Failed to update Launch at Login."
+        }
+        return "Failed to update Launch at Login: \(message)"
     }
 
     private func storageKey(for displayID: CGDirectDisplayID) -> String {
