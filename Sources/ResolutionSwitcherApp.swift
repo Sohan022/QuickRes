@@ -343,6 +343,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        guard isRunningFromAppBundle() else {
+            lastErrorMessage = "Launch at Login works only when running QuickRes.app (not from Terminal)."
+            rebuildMenu()
+            return
+        }
+
         guard #available(macOS 13.0, *) else {
             lastErrorMessage = "Launch at Login requires macOS 13 or later."
             rebuildMenu()
@@ -815,6 +821,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func launchAtLoginToggleIsSupported() -> Bool {
+        guard isRunningFromAppBundle() else {
+            return false
+        }
         if #available(macOS 13.0, *) {
             return true
         }
@@ -822,6 +831,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func launchAtLoginMenuTitle() -> String {
+        guard isRunningFromAppBundle() else {
+            return "Launch at Login"
+        }
+
         guard #available(macOS 13.0, *) else {
             return "Launch at Login (macOS 13+)"
         }
@@ -835,6 +848,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func launchAtLoginMenuState() -> NSControl.StateValue {
+        guard isRunningFromAppBundle() else {
+            return .off
+        }
+
         guard #available(macOS 13.0, *) else {
             return .off
         }
@@ -847,6 +864,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             return .off
         }
+    }
+
+    private func isRunningFromAppBundle() -> Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
     }
 
     private func shouldConfirmRiskyMode(_ mode: CGDisplayMode, on display: DisplayInfo) -> Bool {
