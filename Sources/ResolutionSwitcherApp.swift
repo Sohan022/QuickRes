@@ -249,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         loadPersistedSettings()
+        try? refreshLaunchAgentIfEnabled()
         Self.sharedForHotKeys = self
         registerHotKeys()
         configureStatusItem()
@@ -385,9 +386,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
-        guard #available(macOS 13.0, *) else {
-            return
-        }
         guard isRunningFromAppBundle else {
             lastErrorMessage = "Launch at Login requires QuickRes.app (not swift run)."
             rebuildMenu()
@@ -395,21 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            switch SMAppService.mainApp.status {
-            case .enabled:
-                try SMAppService.mainApp.unregister()
-            case .notRegistered:
-                try SMAppService.mainApp.register()
-            case .requiresApproval:
-                SMAppService.openSystemSettingsLoginItems()
-            case .notFound:
-                throw NSError(
-                    domain: "QuickRes",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "QuickRes.app was not found in Applications. Move it to /Applications or ~/Applications and try again."]
-                )
-            @unknown default:
-                try SMAppService.mainApp.register()
+            if isLaunchAtLoginEnabled() {
+                try disableLaunchAtLogin()
+            } else {
+                try enableLaunchAtLogin()
             }
             lastErrorMessage = nil
         } catch {
@@ -623,13 +610,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var launchAtLoginHelpText: String {
+        if !isRunningFromAppBundle {
+            return "Launch at Login requires QuickRes.app (not swift run)."
+        }
         if #available(macOS 13.0, *) {
             if SMAppService.mainApp.status == .requiresApproval {
                 return "macOS requires approval in System Settings > Login Items."
             }
+            if isLaunchAgentEnabled() {
+                return "Using fallback startup mode (works outside Applications)."
+            }
             return ""
         }
-        return "Launch at Login requires macOS 13 or later."
+        if isLaunchAgentEnabled() {
+            return "Using fallback startup mode."
+        }
+        return ""
     }
 
     private var shouldShowLaunchAtLoginHelpText: Bool {
@@ -651,8 +647,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard #available(macOS 13.0, *) else {
-            item.isEnabled = false
-            item.state = .off
+            item.state = isLaunchAgentEnabled() ? .on : .off
             return item
         }
 
@@ -661,11 +656,161 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.state = .on
         case .requiresApproval:
             item.state = .mixed
-        default:
-            item.state = .off
+        case .notRegistered, .notFound:
+            item.state = isLaunchAgentEnabled() ? .on : .off
+        @unknown default:
+            item.state = isLaunchAgentEnabled() ? .on : .off
         }
 
         return item
+    }
+
+    private func isLaunchAtLoginEnabled() -> Bool {
+        if #available(macOS 13.0, *) {
+            switch SMAppService.mainApp.status {
+            case .enabled, .requiresApproval:
+                return true
+            case .notRegistered, .notFound:
+                break
+            @unknown default:
+                break
+            }
+        }
+        return isLaunchAgentEnabled()
+    }
+
+    private func enableLaunchAtLogin() throws {
+        if #available(macOS 13.0, *) {
+            switch SMAppService.mainApp.status {
+            case .enabled:
+                return
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+                return
+            case .notRegistered:
+                do {
+                    try SMAppService.mainApp.register()
+                    try uninstallLaunchAgent()
+                    return
+                } catch {
+                    let nsError = error as NSError
+                    if !shouldUseLaunchAgentFallback(for: nsError) {
+                        throw error
+                    }
+                }
+            case .notFound:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        try installLaunchAgent()
+    }
+
+    private func disableLaunchAtLogin() throws {
+        var firstError: Error?
+
+        if #available(macOS 13.0, *) {
+            switch SMAppService.mainApp.status {
+            case .enabled, .requiresApproval:
+                do {
+                    try SMAppService.mainApp.unregister()
+                } catch {
+                    let nsError = error as NSError
+                    if nsError.code != Int(kSMErrorJobNotFound) {
+                        firstError = error
+                    }
+                }
+            case .notRegistered, .notFound:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        do {
+            try uninstallLaunchAgent()
+        } catch {
+            if firstError == nil {
+                firstError = error
+            }
+        }
+
+        if let firstError {
+            throw firstError
+        }
+    }
+
+    private func shouldUseLaunchAgentFallback(for error: NSError) -> Bool {
+        switch error.code {
+        case Int(kSMErrorInternalFailure),
+             Int(kSMErrorInvalidSignature),
+             Int(kSMErrorToolNotValid),
+             Int(kSMErrorServiceUnavailable),
+             Int(kSMErrorJobPlistNotFound):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var launchAgentLabel: String {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.quickres.app"
+        return "\(bundleID).launchagent"
+    }
+
+    private var launchAgentPlistURL: URL? {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
+    }
+
+    private func isLaunchAgentEnabled() -> Bool {
+        guard let launchAgentPlistURL else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: launchAgentPlistURL.path)
+    }
+
+    private func installLaunchAgent() throws {
+        guard let launchAgentPlistURL else {
+            throw NSError(
+                domain: "QuickRes",
+                code: 2001,
+                userInfo: [NSLocalizedDescriptionKey: "Could not resolve LaunchAgents folder."]
+            )
+        }
+
+        let launchAgentDirectory = launchAgentPlistURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: launchAgentDirectory, withIntermediateDirectories: true)
+
+        let programArguments = ["/usr/bin/open", "-gj", Bundle.main.bundleURL.path]
+        let plist: [String: Any] = [
+            "Label": launchAgentLabel,
+            "ProgramArguments": programArguments,
+            "RunAtLoad": true,
+            "KeepAlive": false,
+            "LimitLoadToSessionType": "Aqua",
+        ]
+
+        let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try plistData.write(to: launchAgentPlistURL, options: .atomic)
+    }
+
+    private func uninstallLaunchAgent() throws {
+        guard let launchAgentPlistURL else {
+            return
+        }
+        if FileManager.default.fileExists(atPath: launchAgentPlistURL.path) {
+            try FileManager.default.removeItem(at: launchAgentPlistURL)
+        }
+    }
+
+    private func refreshLaunchAgentIfEnabled() throws {
+        if isLaunchAgentEnabled() {
+            try installLaunchAgent()
+        }
     }
 
     private func launchAtLoginErrorMessage(for error: Error) -> String {
